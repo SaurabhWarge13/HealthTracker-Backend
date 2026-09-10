@@ -1,0 +1,876 @@
+{
+  "info": {
+    "name": "Health Tracker Backend",
+    "description": "Mock REST API for the health-tracker React Native app.\n\n## Setup\n\n1. Start the server: `npm run dev`\n2. Set the `baseUrl` variable below if you are not on `http://localhost:3000`\n   - Android emulator: `http://10.0.2.2:3000`\n   - Physical device: the LAN IP the server prints on boot\n3. Run **Auth > Login (demo user)** first — it captures the tokens automatically into the `accessToken` / `refreshToken` collection variables, so every other request just works.\n\nEvery request has tests attached, so you can also hit **Run collection** and watch the whole suite go green. Run it top to bottom: the folders are ordered so tokens and ids are captured before they are needed.\n\n## Auth\n\nProtected requests inherit `Authorization: Bearer {{accessToken}}` from the collection. Access tokens expire after 15 minutes — re-run **Login** or **Refresh** to get a new one.\n\nSignup is two steps: `POST /auth/signup` holds the credentials and creates nothing, then `POST /auth/verify-otp` verifies the code and creates the account. The code is always `1234` and the server logs it. Pending signups are in-memory, so run the two requests in order and restart-free.\n\nRefresh rotates: each call invalidates the previous refresh token, and logging in elsewhere ends the previous session (single-session-per-user by design).\n\n## Error shape\n\nEvery error returns `{ error: { code, message, fields? } }`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "demoEmail", "value": "demo@healthtracker.app", "type": "string" },
+    { "key": "demoPassword", "value": "password123", "type": "string" },
+    { "key": "accessToken", "value": "", "type": "string" },
+    { "key": "refreshToken", "value": "", "type": "string" },
+    { "key": "oldRefreshToken", "value": "", "type": "string" },
+    { "key": "checkInId", "value": "", "type": "string" },
+    { "key": "crossUserCheckInId", "value": "", "type": "string" },
+    { "key": "altAccessToken", "value": "", "type": "string" },
+    { "key": "altEmail", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Signup, verify-otp, login, refresh, logout. No token required except on logout.\n\nSignup is two steps: signup holds the credentials, verify-otp creates the account. Run them in order — the pending signup is in-memory and the second request reuses the first's email.",
+      "item": [
+        {
+          "name": "Login (demo user)",
+          "description": "Start here. Captures accessToken + refreshToken into collection variables.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"{{demoPassword}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('returns a token pair and user', () => {",
+                  "  pm.expect(b.accessToken).to.be.a('string').and.not.empty;",
+                  "  pm.expect(b.refreshToken).to.be.a('string').and.not.empty;",
+                  "  pm.expect(b.user).to.have.property('id');",
+                  "  pm.expect(b.user.email).to.eql(pm.collectionVariables.get('demoEmail'));",
+                  "});",
+                  "pm.collectionVariables.set('accessToken', b.accessToken);",
+                  "pm.collectionVariables.set('refreshToken', b.refreshToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Signup (step 1 — no account yet)",
+          "description": "Picks a random email each run and starts a pending signup. Creates no user and returns no tokens — the next request is what creates the account.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/signup", "host": ["{{baseUrl}}"], "path": ["auth", "signup"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{altEmail}}\",\n  \"password\": \"password123\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh email each run so the request stays repeatable.",
+                  "pm.collectionVariables.set('altEmail', `user-${Date.now()}@example.com`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('echoes the email and issues no tokens', () => {",
+                  "  pm.expect(b.email).to.eql(pm.collectionVariables.get('altEmail'));",
+                  "  pm.expect(b).to.not.have.property('accessToken');",
+                  "  pm.expect(b).to.not.have.property('refreshToken');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify OTP (step 2 — creates the user)",
+          "description": "Verifies the hardcoded 1234 code, which is what actually creates the account, and stores its token as altAccessToken — used by the cross-user isolation checks.\n\nMust run straight after Signup: it reuses that request's altEmail (without regenerating it) to match the pending signup, which lives only in the server's memory.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/verify-otp", "host": ["{{baseUrl}}"], "path": ["auth", "verify-otp"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{altEmail}}\",\n  \"code\": \"1234\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('returns a token pair and the new user', () => {",
+                  "  pm.expect(b.accessToken).to.be.a('string').and.not.empty;",
+                  "  pm.expect(b.refreshToken).to.be.a('string').and.not.empty;",
+                  "  pm.expect(b.user).to.have.property('id');",
+                  "  pm.expect(b.user.email).to.eql(pm.collectionVariables.get('altEmail'));",
+                  "});",
+                  "pm.collectionVariables.set('altAccessToken', b.accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh (rotates the pair)",
+          "description": "Issues a NEW access + refresh pair and invalidates the one presented. Keeps the spent token in oldRefreshToken so the replay check below can prove rotation.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('oldRefreshToken', pm.collectionVariables.get('refreshToken'));"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('issued a DIFFERENT refresh token', () => {",
+                  "  pm.expect(b.refreshToken).to.not.eql(pm.collectionVariables.get('oldRefreshToken'));",
+                  "});",
+                  "pm.collectionVariables.set('accessToken', b.accessToken);",
+                  "pm.collectionVariables.set('refreshToken', b.refreshToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "description": "Requires a valid access token. Clears the stored refresh hash, so refreshing afterwards fails.",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/logout", "host": ["{{baseUrl}}"], "path": ["auth", "logout"] },
+            "body": { "mode": "raw", "raw": "{}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "pm.test('empty body', () => pm.expect(pm.response.text()).to.be.empty);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Profile",
+      "description": "Requires an access token. A 404 from GET is meaningful — it is how the app knows the user still needs onboarding.",
+      "item": [
+        {
+          "name": "Get profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('has the documented shape', () => {",
+                  "  pm.expect(b).to.have.all.keys('name','baselineWeight','height','stepGoal','waterGoal','targetWeight','updatedAt');",
+                  "  pm.expect(b.baselineWeight).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Upsert profile",
+          "description": "Creates the profile if none exists, otherwise updates it. Full replace: any optional field you omit is written as null.",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Demo User\",\n  \"baselineWeight\": 76.5,\n  \"height\": 175,\n  \"stepGoal\": 10000,\n  \"waterGoal\": 2500,\n  \"targetWeight\": 70\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('persisted the values sent', () => {",
+                  "  pm.expect(b.baselineWeight).to.eql(76.5);",
+                  "  pm.expect(b.stepGoal).to.eql(10000);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get profile — 404 (needs onboarding)",
+          "description": "Same GET, but as the freshly signed-up user who has no profile yet. The frontend treats this 404 as 'show onboarding' — it is not an error condition.",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{altAccessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('code = NOT_FOUND, not an empty object', () => {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Check-ins",
+      "description": "Requires an access token. Every operation is scoped to the token's user.",
+      "item": [
+        {
+          "name": "List check-ins",
+          "description": "All of the current user's check-ins, newest first by recordedAt.",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/checkins", "host": ["{{baseUrl}}"], "path": ["checkins"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const rows = pm.response.json();",
+                  "pm.test('returns an array', () => pm.expect(rows).to.be.an('array'));",
+                  "pm.test('newest first', () => {",
+                  "  const t = rows.map(r => new Date(r.recordedAt).getTime());",
+                  "  pm.expect(t.every((v, i) => i === 0 || t[i - 1] >= v)).to.be.true;",
+                  "});",
+                  "pm.test(\"'sources' is a parsed object, never a string\", () => {",
+                  "  rows.forEach(r => pm.expect(r.sources).to.be.an('object'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create check-in",
+          "description": "The server-assigned id in the response is what the client maps its local id to. Captured here as checkInId.",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/checkins", "host": ["{{baseUrl}}"], "path": ["checkins"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"weightKg\": 71.5,\n  \"heightCm\": 175,\n  \"sleepMinutes\": 430,\n  \"steps\": 9000,\n  \"waterMl\": 2400,\n  \"mood\": 4,\n  \"notes\": \"Created from Postman\",\n  \"sources\": {\n    \"weight\": \"manual\",\n    \"height\": \"manual\",\n    \"sleep\": \"health_connect\",\n    \"steps\": \"health_connect\",\n    \"water\": \"manual\"\n  },\n  \"recordedAt\": \"{{$isoTimestamp}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('server assigned an id', () => pm.expect(b.id).to.be.a('string').and.not.empty);",
+                  "pm.test(\"'sources' came back as an object\", () => {",
+                  "  pm.expect(b.sources).to.be.an('object');",
+                  "  pm.expect(b.sources.sleep).to.eql('health_connect');",
+                  "});",
+                  "pm.collectionVariables.set('checkInId', b.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get check-in by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/checkins/{{checkInId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["checkins", "{{checkInId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('is the check-in we created', () => {",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('checkInId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update check-in (full replace)",
+          "description": "PUT replaces the whole record. Note 'steps' is omitted here — it comes back as null, it is not preserved from the previous value.",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{baseUrl}}/checkins/{{checkInId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["checkins", "{{checkInId}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"weightKg\": 71.0,\n  \"mood\": 5,\n  \"notes\": \"Updated from Postman\",\n  \"sources\": {\n    \"weight\": \"manual\",\n    \"height\": \"manual\",\n    \"sleep\": \"manual\",\n    \"steps\": \"manual\",\n    \"water\": \"manual\"\n  },\n  \"recordedAt\": \"{{$isoTimestamp}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('weight updated', () => pm.expect(b.weightKg).to.eql(71.0));",
+                  "pm.test('omitted field nulled (full replace)', () => pm.expect(b.steps).to.be.null);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete check-in",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/checkins/{{checkInId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["checkins", "{{checkInId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "pm.test('empty body', () => pm.expect(pm.response.text()).to.be.empty);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Dev toggles",
+      "description": "No token required. In-memory switches for demoing the app's loading and error states. They reset when the server restarts.\n\n/dev routes are exempt from both effects, so you can always switch latency back off without waiting out the delay you just set.",
+      "item": [
+        {
+          "name": "Set latency (2000ms)",
+          "description": "Every later non-/dev request sleeps this long before responding.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/dev/latency", "host": ["{{baseUrl}}"], "path": ["dev", "latency"] },
+            "body": { "mode": "raw", "raw": "{\n  \"ms\": 2000\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('echoes the latency', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.ok).to.be.true;",
+                  "  pm.expect(b.latencyMs).to.eql(2000);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reset latency (0ms)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/dev/latency", "host": ["{{baseUrl}}"], "path": ["dev", "latency"] },
+            "body": { "mode": "raw", "raw": "{\n  \"ms\": 0\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('latency is back to 0', () => pm.expect(pm.response.json().latencyMs).to.eql(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Arm fail-next",
+          "description": "The NEXT non-/dev request returns 500 SIMULATED_FAILURE, then behaviour resets. Run 'Trigger the simulated failure' straight after this.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/dev/fail-next", "host": ["{{baseUrl}}"], "path": ["dev", "fail-next"] },
+            "body": { "mode": "raw", "raw": "{}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('armed', () => pm.expect(pm.response.json().ok).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Trigger the simulated failure",
+          "description": "An ordinary request that fails because fail-next is armed.",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/checkins", "host": ["{{baseUrl}}"], "path": ["checkins"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('500 Internal Server Error', () => pm.response.to.have.status(500));",
+                  "pm.test('code = SIMULATED_FAILURE', () => {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('SIMULATED_FAILURE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirm the flag reset",
+          "description": "The same request again — succeeds, because fail-next is one-shot.",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/checkins", "host": ["{{baseUrl}}"], "path": ["checkins"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 OK — flag was one-shot', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Error cases",
+      "description": "The failure paths worth seeing. Every one returns the same shape: { error: { code, message, fields? } }.",
+      "item": [
+        {
+          "name": "Login — wrong password (401)",
+          "description": "Same error whether the email is unknown or the password is wrong — the API never reveals which accounts exist.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"wrong-password\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('code = INVALID_CREDENTIALS', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_CREDENTIALS'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify OTP — wrong code (400)",
+          "description": "A wrong code is a 400, never a 401 — a 401 would tell the client its session had expired and trigger a token refresh.\n\nChecked before the pending lookup, so this returns INVALID_OTP rather than NO_PENDING_SIGNUP even for an address with no signup in flight — a wrong code reveals nothing about which addresses are mid-signup.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/verify-otp", "host": ["{{baseUrl}}"], "path": ["auth", "verify-otp"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{altEmail}}\",\n  \"code\": \"9999\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('code = INVALID_OTP', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_OTP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Verify OTP — replayed after success (400)",
+          "description": "The altEmail signup was already verified, so its pending entry is gone. A replay fails the pending lookup first: NO_PENDING_SIGNUP, not EMAIL_TAKEN and not a unique-constraint 500.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/verify-otp", "host": ["{{baseUrl}}"], "path": ["auth", "verify-otp"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{altEmail}}\",\n  \"code\": \"1234\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('code = NO_PENDING_SIGNUP', () => pm.expect(pm.response.json().error.code).to.eql('NO_PENDING_SIGNUP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Signup — email taken (409)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/signup", "host": ["{{baseUrl}}"], "path": ["auth", "signup"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{demoEmail}}\",\n  \"password\": \"password123\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('code = EMAIL_TAKEN', () => pm.expect(pm.response.json().error.code).to.eql('EMAIL_TAKEN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Signup — invalid body (400)",
+          "description": "Shows the `fields` key: the full Zod issue tree, for mapping errors onto form inputs.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/signup", "host": ["{{baseUrl}}"], "path": ["auth", "signup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"not-an-email\",\n  \"password\": \"short\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "const e = pm.response.json().error;",
+                  "pm.test('code = VALIDATION_ERROR with a fields tree', () => {",
+                  "  pm.expect(e.code).to.eql('VALIDATION_ERROR');",
+                  "  pm.expect(e.message).to.be.a('string').and.not.empty;",
+                  "  pm.expect(e).to.have.property('fields');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Protected route — no token (401)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('code = NO_TOKEN', () => pm.expect(pm.response.json().error.code).to.eql('NO_TOKEN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Protected route — bad token (401)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "garbage.token.here", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('code = INVALID_TOKEN', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TOKEN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh token used as access token (401)",
+          "description": "Tokens carry a `type` claim, so a refresh token cannot stand in for an access token.",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{refreshToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/profile", "host": ["{{baseUrl}}"], "path": ["profile"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('code = INVALID_TOKEN', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_TOKEN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay a rotated refresh token (401)",
+          "description": "Uses oldRefreshToken — the one spent by the Refresh request. Rotation means it is already dead.",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] },
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{oldRefreshToken}}\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('code = INVALID_REFRESH_TOKEN', () => pm.expect(pm.response.json().error.code).to.eql('INVALID_REFRESH_TOKEN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Check-in not found (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/checkins/does-not-exist",
+              "host": ["{{baseUrl}}"],
+              "path": ["checkins", "does-not-exist"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('code = NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another user's check-in (404, not 403)",
+          "description": "Uses the second user's token against a check-in that genuinely belongs to the demo user. Returns the same 404 as a nonexistent record — the API never confirms that someone else's row exists.\n\nSelf-contained: the pre-request script creates a real check-in as the demo user first, so this proves scoping rather than just hitting a missing id.",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{altAccessToken}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/checkins/{{crossUserCheckInId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["checkins", "{{crossUserCheckInId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Create a check-in owned by the DEMO user, so the 404 below proves",
+                  "// ownership scoping rather than the row simply not existing.",
+                  "pm.sendRequest({",
+                  "  url: pm.collectionVariables.get('baseUrl') + '/checkins',",
+                  "  method: 'POST',",
+                  "  header: {",
+                  "    'Content-Type': 'application/json',",
+                  "    'Authorization': 'Bearer ' + pm.collectionVariables.get('accessToken')",
+                  "  },",
+                  "  body: {",
+                  "    mode: 'raw',",
+                  "    raw: JSON.stringify({",
+                  "      weightKg: 70.1,",
+                  "      notes: 'owned by demo user',",
+                  "      sources: { weight: 'manual', height: 'manual', sleep: 'manual', steps: 'manual', water: 'manual' },",
+                  "      recordedAt: new Date().toISOString()",
+                  "    })",
+                  "  }",
+                  "}, (err, res) => {",
+                  "  if (!err && res.code === 201) {",
+                  "    pm.collectionVariables.set('crossUserCheckInId', res.json().id);",
+                  "  }",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found (no existence leak)', () => pm.response.to.have.status(404));",
+                  "pm.test('code = NOT_FOUND', () => pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'));",
+                  "",
+                  "// And confirm the row really does exist for its owner.",
+                  "pm.sendRequest({",
+                  "  url: pm.collectionVariables.get('baseUrl') + '/checkins/' + pm.collectionVariables.get('crossUserCheckInId'),",
+                  "  method: 'GET',",
+                  "  header: { 'Authorization': 'Bearer ' + pm.collectionVariables.get('accessToken') }",
+                  "}, (err, res) => {",
+                  "  pm.test('same row IS visible to its owner (200)', () => {",
+                  "    pm.expect(res.code).to.eql(200);",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

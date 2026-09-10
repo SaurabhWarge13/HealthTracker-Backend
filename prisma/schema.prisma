@@ -1,0 +1,62 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id               String    @id @default(uuid())
+  email            String    @unique
+  passwordHash     String
+  refreshTokenHash String?
+  createdAt        DateTime  @default(now())
+
+  profile          Profile?
+  checkIns         CheckIn[]
+}
+
+model Profile {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id])
+
+  name           String?
+  baselineWeight Float
+  height         Float?
+  stepGoal       Int?
+  waterGoal      Int?
+  /// Minutes, matching `sleepMinutes` on a check-in so neither side converts.
+  sleepGoal      Int?
+  targetWeight   Float?
+
+  updatedAt      DateTime @updatedAt
+}
+
+model CheckIn {
+  id           String   @id @default(uuid())
+  /// The client's own id, which makes POST /checkins an idempotent upsert.
+  /// Nullable for clients that send none; SQLite treats NULLs as distinct in a
+  /// unique index, so those rows cannot collide with each other.
+  clientId     String?
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+
+  weightKg     Float
+  heightCm     Float?
+  sleepMinutes Int?
+  steps        Int?
+  waterMl      Int?
+  mood         Int?
+  notes        String?
+  sourcesJson  String
+
+  recordedAt   DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, clientId])
+  @@index([userId, recordedAt])
+}

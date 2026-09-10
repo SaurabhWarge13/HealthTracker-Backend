@@ -1,0 +1,44 @@
+# Render blueprint for the mock backend.
+#
+# Everything the service needs at runtime is here; nothing in `src/` changes to
+# support deployment. `src/index.ts` already binds `0.0.0.0` on `env.PORT`, so
+# Render's injected PORT is picked up with no code change.
+services:
+  - type: web
+    name: health-tracker-backend
+    runtime: node
+    plan: free
+    branch: main
+    healthCheckPath: /health
+
+    # Render's default build is `npm install`, which leaves no `dist/` for
+    # `npm start` (`node dist/index.js`) to run. `--include=dev` guarantees
+    # typescript, the prisma CLI and ts-node are present regardless of how
+    # Render sets NODE_ENV.
+    buildCommand: npm install --include=dev && npm run build
+
+    # Migrate and seed at START, not build. The free tier has no persistent
+    # disk — the filesystem is discarded on redeploy, restart AND spin-down —
+    # so a database created at build time would not be there on the first
+    # request. Seeding at boot also keeps the demo data fresh, since
+    # `prisma/seed.ts` computes `recordedAt` relative to seed time.
+    startCommand: npx prisma migrate deploy && npx prisma db seed && npm start
+
+    envVars:
+      # `src/config/env.ts` throws at import time if either secret is missing,
+      # so without these the service crash-loops on boot. generateValue has
+      # Render mint a random value — no secret enters the repo.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_ACCESS_EXPIRY
+        value: "15m"
+      - key: JWT_REFRESH_EXPIRY
+        value: "30d"
+      - key: BCRYPT_SALT_ROUNDS
+        value: "10"
+      # PORT is deliberately NOT set: Render injects it and env.PORT coerces it.
+      # DATABASE_URL is deliberately NOT set: prisma/schema.prisma hardcodes
+      # `file:./dev.db`, which Prisma resolves relative to the prisma/ directory
+      # regardless of cwd, and that path is writable on Render.
