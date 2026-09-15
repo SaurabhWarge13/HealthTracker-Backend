@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import type { LoginInput, SignupInput, VerifyOtpInput } from '../schemas/auth.schema';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/jwt';
 import { comparePassword, hashPassword } from '../utils/password';
+import { getProfileOrNull, type ProfileResponse } from './profile.service';
 
 /**
  * bcrypt truncates at 72 bytes, and every refresh token issued to a user
@@ -13,10 +14,18 @@ import { comparePassword, hashPassword } from '../utils/password';
  */
 const digest = (token: string): string => createHash('sha256').update(token).digest('hex');
 
+/**
+ * `profile` rides along so the client learns its onboarding state from the same
+ * response that establishes the session, instead of a second `GET /profile`
+ * that can fail on its own. `null` means the user has no profile row yet, which
+ * is how a client decides to show onboarding. Refresh deliberately does NOT
+ * carry it — see `refresh()`.
+ */
 interface AuthResult {
   accessToken: string;
   refreshToken: string;
   user: { id: string; email: string };
+  profile: ProfileResponse | null;
 }
 
 interface TokenPair {
@@ -97,7 +106,9 @@ export async function verifyOtp({ email, code }: VerifyOtpInput): Promise<AuthRe
   pendingSignups.delete(email);
 
   const tokens = await issueTokens(user.id);
-  return { ...tokens, user: { id: user.id, email: user.email } };
+  // This call is what creates the user, so a profile cannot exist yet. Stating
+  // it beats querying for a row we know is absent.
+  return { ...tokens, user: { id: user.id, email: user.email }, profile: null };
 }
 
 export async function login({ email, password }: LoginInput): Promise<AuthResult> {
@@ -110,9 +121,18 @@ export async function login({ email, password }: LoginInput): Promise<AuthResult
   if (!(await comparePassword(password, user.passwordHash))) throw invalid;
 
   const tokens = await issueTokens(user.id);
-  return { ...tokens, user: { id: user.id, email: user.email } };
+  return {
+    ...tokens,
+    user: { id: user.id, email: user.email },
+    profile: await getProfileOrNull(user.id),
+  };
 }
 
+/**
+ * Returns a token pair only. Refresh fires at arbitrary moments from the
+ * client's 401 handler, so returning profile here would let a background token
+ * rotation change which screen the user is looking at.
+ */
 export async function refresh(refreshToken: string): Promise<TokenPair> {
   // Bad signature, expiry, deleted user, logged-out session and superseded
   // token are all indistinguishable to the caller.

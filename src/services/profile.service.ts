@@ -3,7 +3,7 @@ import { prisma } from '../lib/prisma';
 import { notFound } from '../middleware/errorHandler';
 import type { UpsertProfileInput } from '../schemas/profile.schema';
 
-interface ProfileResponse {
+export interface ProfileResponse {
   name: string | null;
   baselineWeight: number;
   height: number | null;
@@ -34,6 +34,19 @@ export async function getProfile(userId: string): Promise<ProfileResponse> {
   const profile = await prisma.profile.findUnique({ where: { userId } });
   if (!profile) throw notFound();
   return toApi(profile);
+}
+
+/**
+ * The nullable counterpart to `getProfile`, for the one caller that treats "no
+ * profile yet" as a normal outcome rather than an error: the auth response
+ * embeds the profile so a client never needs a second round trip to learn
+ * whether it should show onboarding. `GET /profile` keeps its 404 contract.
+ */
+export async function getProfileOrNull(
+  userId: string,
+): Promise<ProfileResponse | null> {
+  const profile = await prisma.profile.findUnique({ where: { userId } });
+  return profile === null ? null : toApi(profile);
 }
 
 export async function upsertProfile(

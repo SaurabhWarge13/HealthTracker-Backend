@@ -396,8 +396,11 @@ Two choices worth explaining:
 `PORT` and `DATABASE_URL` are deliberately left unset — Render injects the former, and the
 latter is hardcoded in the schema.
 
-**There is no deployed instance yet.** The repository currently has no commits and no git
-remote, so `branch: main` has nothing to deploy from.
+**Deployed instance:** `https://healthtracker-backend-k6v3.onrender.com`, live on the free
+plan. Two consequences of that plan, both expected rather than broken: the service spins down
+when idle, so the first request after a quiet period pays a cold start; and that same
+spin-down is what resets the database, so the demo data is always freshly seeded and anything
+a user created is gone — see [Known limitations](#known-limitations).
 
 ---
 
@@ -426,12 +429,44 @@ pagination, no roles, no file uploads.
 
 Things worth knowing before pointing anything real at this:
 
+- **Anything a user creates on the hosted instance is temporary.** The free plan has no
+  persistent disk, so the filesystem — and with it `prisma/dev.db` — is discarded on every
+  deploy, restart and idle spin-down, and the start command rebuilds the database from
+  migrations plus the seed. This is the one limitation that blocks real use rather than merely
+  needing care. *Why:* SQLite was chosen for a backend whose job is to serve one demo app, and
+  it buys a clean clone that serves requests after a single `npm install`, with no server,
+  container or cloud dependency to stand up first. That trade is right for local development
+  and wrong for hosting, and the two can't be separated while the datasource is a file. Fixing
+  it means attaching a Render disk, or moving the datasource to Postgres — see
+  [SQLite trade-offs](#sqlite-trade-offs).
 - **`/dev` toggles are unauthenticated and not environment-gated.** They are mounted in the
   same app that `render.yaml` deploys, so anyone who can reach a deployed instance can add up
-  to 60 seconds of latency to every request or arm a 500.
+  to 60 seconds of latency to every request or arm a 500. *Why:* they exist so the app's
+  loading and error states can be demoed from a real phone against the real deployment, and
+  both plausible gates defeat that. An `NODE_ENV` gate would switch them off in the one
+  environment the demo runs in; an auth gate would make them useless for demoing the
+  unauthenticated screens, since arming latency before a slow login is exactly the case you
+  want to show. The honest summary is that the demo was worth more than the exposure on a
+  throwaway instance — which stops being true the moment anything real is pointed at it.
+  Gating on `NODE_ENV`, or requiring a shared secret header, is a one-line change in
+  `src/app.ts`.
 - **The OTP is hardcoded `1234` everywhere**, including production, and is logged in
   plaintext. With no attempt limit and no rate limiting, a 4-digit code is 10,000 guesses. The
-  seeded demo credentials are live in production too.
+  seeded demo credentials are live in production too. *Why:* the backend has no mail
+  transport, and adding one means a provider account, a domain and deliverability work — all
+  of it outside what this API exists to demonstrate. The two-step flow is still real where it
+  counts: no `User` row exists until a code is verified, so the seam is the code generator,
+  not the account lifecycle. `DEV_OTP_CODE` and `pendingSignups` in
+  `src/services/auth.service.ts` are where a real generator, an expiry and an attempt counter
+  slot in.
+- **One session per user.** Every login *and* every refresh overwrites the single stored
+  `refreshTokenHash`, so signing in on a second device silently ends the first device's
+  session — its next refresh returns `401 INVALID_REFRESH_TOKEN` and the user lands back on
+  the login screen with nothing explaining why. *Why:* one nullable column on `User` does the
+  work of an entire sessions table, and a single-user demo app never has two devices in play.
+  Real multi-device support needs a `Session` model keyed by device with its own row per
+  refresh token — a schema change, not a configuration flag. See
+  [Token rotation](#notes-on-the-implementation) for the mechanics.
 - **No `helmet`** — no HSTS, `X-Frame-Options` or `X-Content-Type-Options`, and Express's
   `x-powered-by` header is left on. CORS is fully permissive by design.
 - **No request logging.** There is no morgan/pino/winston; an HTTP request produces no log
