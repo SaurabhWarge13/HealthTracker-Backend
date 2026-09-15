@@ -5,9 +5,6 @@ import type { CheckInInput, Sources } from '../schemas/checkin.schema';
 
 interface CheckInResponse {
   id: string;
-  // Echoed back so a client can recognise a row it created. Null for rows
-  // written by a client that sent no id.
-  clientId: string | null;
   weightKg: number;
   heightCm: number | null;
   sleepMinutes: number | null;
@@ -26,7 +23,6 @@ interface CheckInResponse {
 function toApi(row: CheckIn): CheckInResponse {
   return {
     id: row.id,
-    clientId: row.clientId,
     weightKg: row.weightKg,
     heightCm: row.heightCm,
     sleepMinutes: row.sleepMinutes,
@@ -73,21 +69,26 @@ export async function getCheckIn(userId: string, id: string): Promise<CheckInRes
 }
 
 /**
- * Upserting on (userId, clientId) makes offline retries safe: a client that
+ * Upserting on the client's own id makes offline retries safe: a client that
  * never saw the response retries the same request, and it lands on the same
- * row instead of creating a duplicate. The constraint is scoped by userId, so
- * two accounts can never collide.
+ * row instead of creating a duplicate.
+ *
+ * The target is (userId, id), not the bare primary key. A plain `where: { id }`
+ * is not userId-scoped, so a client that guessed another account's id could
+ * overwrite that row — the same hazard `updateCheckIn` avoids by using
+ * updateMany. Only an id this user already owns can be updated here; anyone
+ * else's collides on the primary key and surfaces as a 409.
  */
 export async function createCheckIn(userId: string, input: CheckInInput): Promise<CheckInResponse> {
-  const { clientId } = input;
+  const { id } = input;
 
-  if (clientId === undefined) {
+  if (id === undefined) {
     return toApi(await prisma.checkIn.create({ data: { userId, ...toRow(input) } }));
   }
 
   const row = await prisma.checkIn.upsert({
-    where: { userId_clientId: { userId, clientId } },
-    create: { userId, clientId, ...toRow(input) },
+    where: { userId_id: { userId, id } },
+    create: { id, userId, ...toRow(input) },
     update: toRow(input),
   });
   return toApi(row);
@@ -111,21 +112,9 @@ export async function updateCheckIn(
   return toApi(row);
 }
 
-/**
- * Accepts either the server's id or the client's own clientId, because a
- * check-in created offline can reach a state where the client never learned
- * the server id it was given.
- */
 export async function deleteCheckIn(userId: string, id: string): Promise<void> {
-  // Resolved to one row first: matching both columns at once can hit two
-  // different rows (one whose id is X, another whose clientId is X) and delete
-  // both. Server id wins, both lookups are userId-scoped, and the delete goes
-  // by primary key, so at most one row can ever go.
-  const row =
-    (await prisma.checkIn.findFirst({ where: { userId, id } })) ??
-    (await prisma.checkIn.findFirst({ where: { userId, clientId: id } }));
-
-  if (!row) throw notFound();
-
-  await prisma.checkIn.delete({ where: { id: row.id } });
+  // deleteMany (not delete) so the WHERE can include userId — a plain delete
+  // only accepts unique fields and would let one user remove another's row.
+  const { count } = await prisma.checkIn.deleteMany({ where: { id, userId } });
+  if (count === 0) throw notFound();
 }

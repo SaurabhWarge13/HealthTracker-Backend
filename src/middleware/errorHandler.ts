@@ -40,6 +40,15 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
 
+  // Unique constraint violation. Reachable on a normal request now that clients
+  // supply their own ids: a create for an id another account already owns lands
+  // here. It must not be a 500 — the app treats 5xx as transient and would retry
+  // a request that can never succeed.
+  if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+    res.status(409).json({ error: { code: 'CONFLICT', message: 'Resource already exists' } });
+    return;
+  }
+
   // Malformed JSON body — express.json() throws a SyntaxError with `status`.
   if (err instanceof SyntaxError && 'body' in err) {
     res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Malformed JSON body' } });

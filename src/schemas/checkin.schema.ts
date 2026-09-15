@@ -15,9 +15,10 @@ const sourcesSchema = z.object({
 // Shared by POST and PUT: PUT is a full replace, so both take the identical
 // body and any omitted optional field is written as null.
 export const checkInSchema = z.object({
-  // The client's own id, assigned when the check-in was created — possibly
-  // offline. When present it makes POST an idempotent upsert.
-  clientId: z.string().min(1).max(128).optional(),
+  // The canonical id, assigned by the client when the check-in was created —
+  // possibly offline. When present it makes POST an idempotent upsert. Omitting
+  // it falls back to a server-generated id.
+  id: z.string().min(1).max(128).optional(),
   weightKg: z.number().positive('weightKg must be a positive number').max(500),
   heightCm: z.number().positive().max(300).optional(),
   sleepMinutes: z.number().int().min(0).max(1440).optional(),

@@ -1,6 +1,10 @@
 /**
- * One DELETE must remove at most one row: matching `id` and `clientId` in a
- * single query can hit two different rows and delete both.
+ * DELETE is scoped by userId and addresses exactly one row by primary key.
+ *
+ * This file used to guard against a subtler hazard: when a check-in had both an
+ * `id` and a `clientId`, one DELETE could match two different rows and remove
+ * both. Ids are now client-generated and there is only one identity, so that
+ * case cannot arise and its tests are gone.
  *
  * Runs against the real SQLite file on a throwaway user and cleans up after
  * itself, so it can be re-run without leaving residue.
@@ -24,6 +28,11 @@ const input = (over: Partial<CheckInInput> = {}): CheckInInput => ({
 
 let userId: string;
 
+// Ids are client-chosen now, so a literal like 'ck_1' would collide with the
+// same literal in another suite — Jest runs them in parallel against one SQLite
+// file. Namespacing by the throwaway user keeps each run's ids to itself.
+const ck = (name: string) => `${userId}_${name}`;
+
 beforeEach(async () => {
   const user = await prisma.user.create({
     data: {
@@ -46,52 +55,34 @@ afterAll(async () => {
 const rowCount = () => prisma.checkIn.count({ where: { userId } });
 
 describe('deleteCheckIn', () => {
-  it('cannot delete two rows when one row id collides with another row clientId', async () => {
-    // Row A has no clientId, exactly like the seeded rows.
-    const a = await createCheckIn(userId, input({ weightKg: 50 }));
-    // Row B carries A's id as its own clientId.
-    const b = await createCheckIn(userId, input({ weightKg: 51, clientId: a.id }));
+  it('deletes the row the client names by its own id', async () => {
+    const row = await createCheckIn(userId, input({ id: ck('1') }));
+    expect(row.id).toBe(ck('1'));
 
-    expect(a.id).not.toBe(b.id);
-    expect(await rowCount()).toBe(2);
-
-    await deleteCheckIn(userId, a.id);
-
-    // Exactly one row goes, and it is the one addressed by primary key.
-    expect(await rowCount()).toBe(1);
-    expect(await prisma.checkIn.findUnique({ where: { id: a.id } })).toBeNull();
-    expect(await prisma.checkIn.findUnique({ where: { id: b.id } })).not.toBeNull();
-  });
-
-  it('prefers the server id over a clientId match', async () => {
-    const a = await createCheckIn(userId, input({ weightKg: 50 }));
-    const b = await createCheckIn(userId, input({ weightKg: 51, clientId: a.id }));
-
-    await deleteCheckIn(userId, a.id);
-
-    // Precedence is explicit rather than left to the database's row order.
-    const survivor = await prisma.checkIn.findFirst({ where: { userId } });
-    expect(survivor?.id).toBe(b.id);
-  });
-
-  it('still deletes by clientId when no row carries that primary key', async () => {
-    // The offline case: the create landed but its response was lost, so the
-    // client only knows its own id.
-    await createCheckIn(userId, input({ clientId: 'local_orphan' }));
-
-    await deleteCheckIn(userId, 'local_orphan');
+    await deleteCheckIn(userId, ck('1'));
 
     expect(await rowCount()).toBe(0);
   });
 
-  it('deletes by server id', async () => {
-    const row = await createCheckIn(userId, input({ clientId: 'local_1' }));
+  it('removes only the row addressed, never its neighbours', async () => {
+    await createCheckIn(userId, input({ id: ck('1'), weightKg: 50 }));
+    await createCheckIn(userId, input({ id: ck('2'), weightKg: 51 }));
+
+    await deleteCheckIn(userId, ck('1'));
+
+    expect(await rowCount()).toBe(1);
+    expect(await prisma.checkIn.findUnique({ where: { id: ck('1') } })).toBeNull();
+    expect(await prisma.checkIn.findUnique({ where: { id: ck('2') } })).not.toBeNull();
+  });
+
+  it('deletes a row whose id the server assigned', async () => {
+    const row = await createCheckIn(userId, input());
     await deleteCheckIn(userId, row.id);
     expect(await rowCount()).toBe(0);
   });
 
   it('throws NOT_FOUND when nothing matches, and leaves other rows alone', async () => {
-    await createCheckIn(userId, input({ clientId: 'local_1' }));
+    await createCheckIn(userId, input({ id: ck('1') }));
 
     await expect(deleteCheckIn(userId, 'no-such-id')).rejects.toMatchObject({
       status: 404,
@@ -100,8 +91,8 @@ describe('deleteCheckIn', () => {
     expect(await rowCount()).toBe(1);
   });
 
-  it('cannot reach another account\'s row', async () => {
-    const mine = await createCheckIn(userId, input({ clientId: 'local_1' }));
+  it("cannot reach another account's row", async () => {
+    const mine = await createCheckIn(userId, input({ id: ck('1') }));
     const other = await prisma.user.create({
       data: { email: `other-${Date.now()}@test.local`, passwordHash: 'x' },
     });
